@@ -2,7 +2,7 @@
  * productAutoCreate.ts
  *
  * Given a barcode, fetches product info from external APIs
- * (Barcode-Api edge function → UPCItemDB → OpenFoodFacts),
+ * (via consolidated /api/barcode route),
  * inserts a new product into the Supabase `products` table,
  * and returns the created Product row.
  *

@@ -16,10 +16,9 @@ export async function getProductByBarcode(barcode: string): Promise<Product | nu
     .from('products')
     .select('*')
     .eq('barcode', barcode)
-    .single()
+    .maybeSingle()
 
   if (error) {
-    if (error.code === 'PGRST116') return null // Not found
     throw new Error(`Failed to fetch product: ${error.message}`)
   }
   return data
@@ -34,7 +33,14 @@ export async function addProduct(
     .select()
     .single()
 
-  if (error) throw new Error(`Failed to add product: ${error.message}`)
+  if (error) {
+    // Handle unique constraint violation (barcode already exists)
+    if (error.code === '23505') {
+      const existing = await getProductByBarcode(productData.barcode)
+      if (existing) return existing
+    }
+    throw new Error(`Failed to add product: ${error.message}`)
+  }
   return data
 }
 
