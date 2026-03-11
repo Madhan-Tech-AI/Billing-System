@@ -19,7 +19,7 @@ export function BarcodeScanner({ onScan, sessionId }: BarcodeScannerProps) {
   const [lastScanned, setLastScanned] = useState<string | null>(null)
   const [showSuccess, setShowSuccess] = useState(false)
   const [cameras, setCameras] = useState<MediaDeviceInfo[]>([])
-  const [selectedCamera, setSelectedCamera] = useState<string | undefined>(undefined)
+  const [selectedCamera, setSelectedCamera] = useState<string | null>(null)
 
   const handleDecode = useCallback(
     (barcode: string) => {
@@ -42,45 +42,62 @@ export function BarcodeScanner({ onScan, sessionId }: BarcodeScannerProps) {
   )
 
   useEffect(() => {
+    // Initial device list (might be empty labels before permission)
     BrowserMultiFormatReader.listVideoInputDevices().then((devices) => {
       setCameras(devices)
-      // Prefer back camera
-      const backCam = devices.find((d) =>
-        d.label.toLowerCase().includes('back') ||
-        d.label.toLowerCase().includes('rear') ||
-        d.label.toLowerCase().includes('environment')
-      )
-      setSelectedCamera(backCam?.deviceId ?? devices[0]?.deviceId)
-    })
+    }).catch(console.error)
   }, [])
 
   useEffect(() => {
-    if (!selectedCamera || !videoRef.current) return
+    if (!videoRef.current) return
 
     const reader = new BrowserMultiFormatReader()
     setScanning(true)
     setError(null)
 
-    reader
-      .decodeFromVideoDevice(selectedCamera, videoRef.current, (result, err) => {
-        if (result) {
-          handleDecode(result.getText())
-        }
-        if (err && !(err instanceof NotFoundException)) {
-          // Ignore NotFoundException — it fires when no barcode in frame
-        }
-      })
-      .then((controls) => {
+    // Use environment camera by default if no specific camera selected
+    const constraints: MediaStreamConstraints = selectedCamera
+      ? { video: { deviceId: selectedCamera } }
+      : { video: { facingMode: { exact: 'environment' } } }
+
+    // Fallback constraints if 'exact' environment fails (some browsers/devices)
+    const fallbackConstraints: MediaStreamConstraints = selectedCamera
+      ? { video: { deviceId: selectedCamera } }
+      : { video: { facingMode: 'environment' } }
+
+    async function startScanning(cons: MediaStreamConstraints) {
+      try {
+        const controls = await reader.decodeFromConstraints(cons, videoRef.current!, (result, err) => {
+          if (result) {
+            handleDecode(result.getText())
+          }
+          if (err && !(err instanceof NotFoundException)) {
+            // Ignore common scan errors
+          }
+        })
         controlsRef.current = controls
-      })
-      .catch((e) => {
+
+        // Now that permission is granted, refresh camera list to get labels
+        const devices = await BrowserMultiFormatReader.listVideoInputDevices()
+        setCameras(devices)
+      } catch (e: any) {
+        if (cons === constraints && !selectedCamera) {
+          // Try fallback without 'exact'
+          startScanning(fallbackConstraints)
+          return
+        }
         setError(
           e.name === 'NotAllowedError'
             ? 'Camera permission denied. Please allow camera access.'
+            : e.name === 'OverconstrainedError' 
+            ? 'No back camera found. Trying default camera...'
             : `Camera error: ${e.message}`
         )
         setScanning(false)
-      })
+      }
+    }
+
+    startScanning(constraints)
 
     return () => {
       if (controlsRef.current) {
