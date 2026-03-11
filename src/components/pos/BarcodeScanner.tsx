@@ -12,7 +12,7 @@ const EAN13_REGEX = /^[0-9]{13}$/
 const CONFIRM_FRAMES = 2
 
 /** Minimum milliseconds between accepted scans (prevents duplicate inserts) */
-const SCAN_COOLDOWN_MS = 800
+const SCAN_COOLDOWN_MS = 1200
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 

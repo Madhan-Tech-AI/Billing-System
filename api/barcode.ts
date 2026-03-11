@@ -40,8 +40,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       let price = 0
       if (Array.isArray(p.stores)) {
         for (const store of p.stores) {
-          const val = parseFloat(store.price || store.sale_price)
-          if (val > 0) { price = val; break }
+          // BarcodeLookup sometimes sends price as string or number
+          const rawPrice = store.price || store.sale_price || store.msrp
+          const val = typeof rawPrice === 'string' ? parseFloat(rawPrice.replace(/[^0-9.]/g, '')) : parseFloat(rawPrice)
+          if (!isNaN(val) && val > 0) { price = val; break }
         }
       }
 
@@ -72,7 +74,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       if (Array.isArray(item.offers)) {
         for (const offer of item.offers) {
           const val = parseFloat(offer.price)
-          if (val > 0) { price = val; break }
+          if (!isNaN(val) && val > 0) { price = val; break }
         }
       }
 
@@ -125,7 +127,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
 
   // Merge: Priority order for name (api > upc > off), first available price > 0
-  const bestName = validResults.find(r => r.name)?.name || ''
+  const bestResult = validResults.find(r => r.name)
+  const bestName = bestResult?.name || ''
   const bestPrice = validResults.find(r => r.price > 0)?.price || 0
   const bestBrand = validResults.find(r => r.brand)?.brand || ''
   const bestCategory = validResults.find(r => r.category)?.category || 'Uncategorised'
@@ -136,8 +139,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       brand: bestBrand,
       category: bestCategory,
       price: bestPrice,
-      // For compatibility with frontend logic expecting p.stores
-      stores: bestPrice > 0 ? [{ price: bestPrice.toString() }] : []
+      // For compatibility with frontend lookup service
+      stores: bestPrice > 0 ? [{ price: bestPrice }] : []
     }],
     _metadata: {
       sources: validResults.map(r => r.source)
