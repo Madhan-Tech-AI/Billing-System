@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { BrowserMultiFormatReader } from '@zxing/browser'
-import { NotFoundException } from '@zxing/library'
+import { NotFoundException, BarcodeFormat, DecodeHintType } from '@zxing/library'
 import { CheckCircle, Camera, CameraOff, RefreshCcw } from 'lucide-react'
 
 interface BarcodeScannerProps {
@@ -51,7 +51,21 @@ export function BarcodeScanner({ onScan, sessionId }: BarcodeScannerProps) {
   useEffect(() => {
     if (!videoRef.current) return
 
-    const reader = new BrowserMultiFormatReader()
+    // Configure hints for 1D barcodes and better sensitivity
+    const hints = new Map()
+    const formats = [
+      BarcodeFormat.EAN_13,
+      BarcodeFormat.EAN_8,
+      BarcodeFormat.UPC_A,
+      BarcodeFormat.UPC_E,
+      BarcodeFormat.CODE_128,
+      BarcodeFormat.CODE_39,
+      BarcodeFormat.ITF
+    ]
+    hints.set(DecodeHintType.POSSIBLE_FORMATS, formats)
+    hints.set(DecodeHintType.TRY_HARDER, true)
+
+    const reader = new BrowserMultiFormatReader(hints)
     setScanning(true)
     setError(null)
 

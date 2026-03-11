@@ -1,4 +1,4 @@
-import { Minus, Plus, Trash2 } from 'lucide-react'
+import { Trash2, Minus, Plus } from 'lucide-react'
 import { useCartStore } from '../../stores/cartStore'
 import type { CartItem } from '../../supabase/types'
 
@@ -9,41 +9,62 @@ interface CartItemRowProps {
 function CartItemRow({ item }: CartItemRowProps) {
   const { updateQuantity, removeItem } = useCartStore()
 
+  function handleQtyChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const val = parseInt(e.target.value, 10)
+    if (!isNaN(val)) updateQuantity(item.product_id, val)
+  }
+
   return (
     <tr className="border-b border-white/5 hover:bg-white/5 transition-colors group">
+      {/* Product name — read-only */}
       <td className="table-cell">
         <div>
           <p className="font-medium text-white text-sm">{item.name}</p>
           <p className="text-xs text-surface-400 font-mono">{item.barcode}</p>
         </div>
       </td>
+
+      {/* Price — read-only */}
       <td className="table-cell text-surface-300 text-right">
         ₹{item.price.toFixed(2)}
       </td>
+
+      {/* Quantity — editable */}
       <td className="table-cell">
         <div className="flex items-center gap-1 justify-center">
           <button
             id={`decrease-${item.product_id}`}
             onClick={() => updateQuantity(item.product_id, item.quantity - 1)}
-            className="w-7 h-7 rounded-lg bg-surface-800 hover:bg-red-600/20 text-surface-300 hover:text-red-400 flex items-center justify-center transition-all"
+            className="w-7 h-7 rounded-lg bg-surface-800 hover:bg-red-600/20 text-surface-300 hover:text-red-400 flex items-center justify-center transition-all flex-shrink-0"
           >
             <Minus className="w-3 h-3" />
           </button>
-          <span className="w-8 text-center font-semibold text-white text-sm">
-            {item.quantity}
-          </span>
+
+          <input
+            id={`qty-${item.product_id}`}
+            type="number"
+            min={1}
+            value={item.quantity}
+            onChange={handleQtyChange}
+            className="w-12 text-center font-semibold text-white text-sm bg-surface-800 border border-white/10 rounded-lg py-1 focus:outline-none focus:border-primary-500 focus:ring-1 focus:ring-primary-500/30 transition-all [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+          />
+
           <button
             id={`increase-${item.product_id}`}
             onClick={() => updateQuantity(item.product_id, item.quantity + 1)}
-            className="w-7 h-7 rounded-lg bg-surface-800 hover:bg-primary-600/20 text-surface-300 hover:text-primary-400 flex items-center justify-center transition-all"
+            className="w-7 h-7 rounded-lg bg-surface-800 hover:bg-primary-600/20 text-surface-300 hover:text-primary-400 flex items-center justify-center transition-all flex-shrink-0"
           >
             <Plus className="w-3 h-3" />
           </button>
         </div>
       </td>
+
+      {/* Subtotal — read-only */}
       <td className="table-cell text-right">
         <span className="font-semibold text-primary-300">₹{item.subtotal.toFixed(2)}</span>
       </td>
+
+      {/* Remove */}
       <td className="table-cell">
         <button
           id={`remove-${item.product_id}`}

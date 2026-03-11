@@ -1,7 +1,7 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { useReactToPrint } from 'react-to-print'
 import { QRCodeSVG } from 'qrcode.react'
-import { ShoppingCart, Scan, User, LogOut, CheckCircle, Plus } from 'lucide-react'
+import { ShoppingCart, Scan, User, LogOut, CheckCircle, Plus, Loader2 } from 'lucide-react'
 import { CartTable } from '../../components/pos/CartTable'
 import { TotalsPanel } from '../../components/pos/TotalsPanel'
 import { CheckoutPanel } from '../../components/pos/CheckoutPanel'
@@ -13,6 +13,8 @@ import { useCartStore } from '../../stores/cartStore'
 import { useProductStore } from '../../stores/productStore'
 import { useSessionStore } from '../../stores/sessionStore'
 import { subscribeToScanEvents, unsubscribeChannel } from '../../services/scannerService'
+import { getProductByBarcode } from '../../services/productService'
+import { createProductFromBarcode } from '../../services/productAutoCreate'
 import type { RealtimeChannel } from '@supabase/supabase-js'
 import type { CartItem } from '../../supabase/types'
 
@@ -29,19 +31,19 @@ export default function BillingApp() {
   const [cashierInput, setCashierInput] = useState('')
   const [sessionStarted, setSessionStarted] = useState(false)
   const [manualBarcode, setManualBarcode] = useState('')
-  const [manualError, setManualError] = useState<string | null>(null)
   const [notification, setNotification] = useState<string | null>(null)
   const [invoiceData, setInvoiceData] = useState<InvoiceData | null>(null)
   const [showInvoice, setShowInvoice] = useState(false)
+  const [processing, setProcessing] = useState(false)
 
   const channelRef = useRef<RealtimeChannel | null>(null)
   const invoiceRef = useRef<HTMLDivElement>(null)
 
   const { addItem, items, getSubtotal, getTotalGST, getTotal, clearCart } = useCartStore()
-  const { loadProducts, getByBarcode } = useProductStore()
+  const { loadProducts, getByBarcode, addToCache } = useProductStore()
   const { session, startSession, endSession, loading: sessionLoading, error: sessionError } = useSessionStore()
 
-  // If session already exists (persisted), resume it
+  // Resume persisted session on mount
   useEffect(() => {
     if (session) {
       setSessionStarted(true)
@@ -49,18 +51,50 @@ export default function BillingApp() {
     }
   }, [])
 
-  // Subscribe to scan events when session is active
+  // ─── Core barcode handler ────────────────────────────────────────────────────
+  const handleBarcode = useCallback(async (barcode: string) => {
+    if (!barcode.trim()) return
+
+    // 1. Check in-memory product cache (fastest path)
+    const cached = getByBarcode(barcode)
+    if (cached) {
+      addItem(cached)
+      showNotification(`✅ ${cached.name} added`)
+      return
+    }
+
+    setProcessing(true)
+
+    try {
+      // 2. Query Supabase products table
+      const found = await getProductByBarcode(barcode)
+      if (found) {
+        addToCache(found)
+        addItem(found)
+        showNotification(`✅ ${found.name} added`)
+        return
+      }
+
+      // 3. Not in DB — call external API and auto-create
+      showNotification(`🔍 Looking up barcode ${barcode}…`)
+      const created = await createProductFromBarcode(barcode)
+      addToCache(created)
+      addItem(created)
+      showNotification(`🆕 New product created: ${created.name}`)
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Unknown error'
+      showNotification(`⚠️ Failed to process barcode: ${msg}`)
+    } finally {
+      setProcessing(false)
+    }
+  }, [getByBarcode, addItem, addToCache])
+
+  // Subscribe to realtime scan events when session is active
   useEffect(() => {
     if (!session) return
 
     channelRef.current = subscribeToScanEvents(session.id, (barcode) => {
-      const product = getByBarcode(barcode)
-      if (product) {
-        addItem(product)
-        showNotification(`✅ ${product.name} added`)
-      } else {
-        showNotification(`⚠️ Product not found: ${barcode}`)
-      }
+      handleBarcode(barcode)
     })
 
     return () => {
@@ -68,11 +102,11 @@ export default function BillingApp() {
         unsubscribeChannel(channelRef.current)
       }
     }
-  }, [session?.id])
+  }, [session?.id, handleBarcode])
 
   function showNotification(msg: string) {
     setNotification(msg)
-    setTimeout(() => setNotification(null), 3000)
+    setTimeout(() => setNotification(null), 3500)
   }
 
   async function handleStartSession() {
@@ -96,19 +130,12 @@ export default function BillingApp() {
     setSessionStarted(false)
   }
 
-  function handleManualBarcode(e: React.FormEvent) {
+  function handleManualSubmit(e: React.FormEvent) {
     e.preventDefault()
     const barcode = manualBarcode.trim()
-    if (!barcode) return
-    const product = getByBarcode(barcode)
-    if (product) {
-      addItem(product)
-      showNotification(`✅ ${product.name} added`)
-      setManualBarcode('')
-      setManualError(null)
-    } else {
-      setManualError(`No product found for barcode: ${barcode}`)
-    }
+    if (!barcode || processing) return
+    setManualBarcode('')
+    handleBarcode(barcode)
   }
 
   const handlePrint = useReactToPrint({
@@ -133,7 +160,7 @@ export default function BillingApp() {
     ? `${window.location.origin}/scanner?session=${session.id}`
     : ''
 
-  // ─── Login Screen ────────────────────────────────────────────────────────────
+  // ─── Login Screen ─────────────────────────────────────────────────────────
   if (!sessionStarted) {
     return (
       <div className="min-h-screen bg-surface-950 flex items-center justify-center p-6">
@@ -177,7 +204,7 @@ export default function BillingApp() {
     )
   }
 
-  // ─── Main POS Interface ──────────────────────────────────────────────────────
+  // ─── Main POS Interface ───────────────────────────────────────────────────
   return (
     <div className="h-screen flex flex-col bg-surface-950 overflow-hidden">
       {/* Header */}
@@ -197,6 +224,7 @@ export default function BillingApp() {
 
         {notification && (
           <div className="hidden md:flex items-center gap-2 px-3 py-1.5 rounded-full bg-primary-600/20 text-primary-300 text-xs font-medium animate-fade-in">
+            {processing && <Loader2 className="w-3 h-3 animate-spin" />}
             {notification}
           </div>
         )}
@@ -214,7 +242,8 @@ export default function BillingApp() {
 
       {/* Mobile notification */}
       {notification && (
-        <div className="md:hidden px-4 py-2 bg-primary-600/20 text-primary-300 text-xs font-medium text-center">
+        <div className="md:hidden px-4 py-2 bg-primary-600/20 text-primary-300 text-xs font-medium text-center flex items-center justify-center gap-2">
+          {processing && <Loader2 className="w-3 h-3 animate-spin" />}
           {notification}
         </div>
       )}
@@ -239,28 +268,34 @@ export default function BillingApp() {
             </p>
           </div>
 
-          {/* Manual barcode */}
+          {/* Manual barcode entry */}
           <div className="card p-4">
             <p className="text-sm font-semibold text-surface-300 mb-3 flex items-center gap-2">
               <Plus className="w-4 h-4" />
               Manual Entry
             </p>
-            <form onSubmit={handleManualBarcode} className="flex flex-col gap-2">
+            <form onSubmit={handleManualSubmit} className="flex flex-col gap-2">
               <Input
                 id="manual-barcode-input"
-                placeholder="Type or scan barcode..."
+                placeholder="Type or scan barcode…"
                 value={manualBarcode}
-                onChange={(e) => {
-                  setManualBarcode(e.target.value)
-                  setManualError(null)
-                }}
-                error={manualError ?? undefined}
+                onChange={(e) => setManualBarcode(e.target.value)}
                 autoComplete="off"
               />
-              <Button id="add-manual-btn" type="submit" variant="outline" size="sm">
-                Add Item
+              <Button
+                id="add-manual-btn"
+                type="submit"
+                variant="outline"
+                size="sm"
+                disabled={!manualBarcode.trim() || processing}
+                loading={processing}
+              >
+                {processing ? 'Looking up…' : 'Add Item'}
               </Button>
             </form>
+            <p className="text-xs text-surface-600 mt-2">
+              Unknown barcodes are looked up and auto-added.
+            </p>
           </div>
 
           {/* Session info */}
