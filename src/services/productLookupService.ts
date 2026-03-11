@@ -1,49 +1,52 @@
 /**
  * productLookupService.ts
  *
- * Fetches product info from external APIs given a barcode.
+ * Fetches product info for a barcode via three sources in priority order:
  *
- * Priority:
- *   1. Barcode Lookup API  (has price, brand, images)
- *   2. UPCItemDB           (free, good coverage)
- *   3. OpenFoodFacts       (open-source, food items)
+ *   1. Barcode-Api  (Supabase Edge Function — keeps API key server-side)
+ *   2. UPCItemDB    (free, good global coverage)
+ *   3. OpenFoodFacts(open-source, excellent for food/FMCG)
  */
 
 export interface ExternalProductInfo {
   name: string
   brand: string
   category: string
-  price: number        // from store listings if available, else 0
-  imageUrl: string     // first product image if available
+  price: number     // 0 when unavailable
+  imageUrl: string  // empty string when unavailable
 }
 
-// ─── Helper ───────────────────────────────────────────────────────────────────
+const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL as string
+const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY as string
 
+/** Returns true when the result contains a usable product name */
 function hasName(info: ExternalProductInfo | null): info is ExternalProductInfo {
   return !!info?.name?.trim()
 }
 
-// ─── 1. Barcode Lookup API (primary) ─────────────────────────────────────────
+// ─── 1. Supabase Edge Function (primary — API key is secret, server-side) ───
 
-async function lookupBarcodeLookup(barcode: string): Promise<ExternalProductInfo | null> {
-  const apiKey = import.meta.env.VITE_BARCODE_LOOKUP_API_KEY as string
-  if (!apiKey) {
-    console.warn('[productLookup] VITE_BARCODE_LOOKUP_API_KEY not set — skipping Barcode Lookup API')
-    return null
-  }
-
+async function lookupViaEdgeFunction(
+  barcode: string
+): Promise<ExternalProductInfo | null> {
   try {
     const res = await fetch(
-      `https://api.barcodelookup.com/v3/products?barcode=${encodeURIComponent(barcode)}&key=${apiKey}`
+      `${SUPABASE_URL}/functions/v1/Barcode-Api?barcode=${encodeURIComponent(barcode)}`,
+      {
+        headers: {
+          'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
+          'Content-Type': 'application/json',
+        },
+      }
     )
 
-    if (res.status === 404) return null          // product genuinely not found
+    if (res.status === 404) return null          // product not in Barcode Lookup DB
     if (res.status === 429) {
-      console.warn('[productLookup] Barcode Lookup API rate limit hit')
+      console.warn('[productLookup] Edge function rate-limited by Barcode Lookup API')
       return null
     }
     if (!res.ok) {
-      console.warn(`[productLookup] Barcode Lookup API returned ${res.status}`)
+      console.warn(`[productLookup] Edge function responded ${res.status}`)
       return null
     }
 
@@ -51,27 +54,24 @@ async function lookupBarcodeLookup(barcode: string): Promise<ExternalProductInfo
     const p = json?.products?.[0]
     if (!p) return null
 
-    // Pick the lowest numeric store price that makes sense (> 0)
+    // Extract the first store price that is a positive number
     let price = 0
     if (Array.isArray(p.stores)) {
       for (const store of p.stores) {
         const raw = parseFloat(store.price)
-        if (!isNaN(raw) && raw > 0) {
-          price = raw
-          break
-        }
+        if (!isNaN(raw) && raw > 0) { price = raw; break }
       }
     }
 
     return {
-      name: p.title?.trim() ?? '',
-      brand: p.brand?.trim() ?? '',
+      name:     p.title?.trim()    ?? '',
+      brand:    p.brand?.trim()    ?? '',
       category: p.category?.trim() ?? '',
       price,
-      imageUrl: p.images?.[0] ?? '',
+      imageUrl: p.images?.[0]      ?? '',
     }
   } catch (e) {
-    console.error('[productLookup] Barcode Lookup API error:', e)
+    console.error('[productLookup] Edge function error:', e)
     return null
   }
 }
@@ -98,11 +98,11 @@ async function lookupUPCItemDB(barcode: string): Promise<ExternalProductInfo | n
     }
 
     return {
-      name: item.title?.trim() ?? '',
-      brand: item.brand?.trim() ?? '',
+      name:     item.title?.trim()    ?? '',
+      brand:    item.brand?.trim()    ?? '',
       category: item.category?.trim() ?? '',
       price,
-      imageUrl: item.images?.[0] ?? '',
+      imageUrl: item.images?.[0]      ?? '',
     }
   } catch (e) {
     console.warn('[productLookup] UPCItemDB error:', e)
@@ -110,7 +110,7 @@ async function lookupUPCItemDB(barcode: string): Promise<ExternalProductInfo | n
   }
 }
 
-// ─── 3. OpenFoodFacts (second free fallback, food & FMCG) ────────────────────
+// ─── 3. OpenFoodFacts (second free fallback — food & FMCG) ───────────────────
 
 async function lookupOpenFoodFacts(barcode: string): Promise<ExternalProductInfo | null> {
   try {
@@ -125,17 +125,17 @@ async function lookupOpenFoodFacts(barcode: string): Promise<ExternalProductInfo
     const p = json.product
     const name = (
       p.product_name_en ||
-      p.product_name ||
+      p.product_name   ||
       p.abbreviated_product_name ||
       ''
     ).trim()
 
     return {
       name,
-      brand: p.brands?.trim() ?? '',
+      brand:    p.brands?.trim()    ?? '',
       category: p.categories?.trim() ?? '',
-      price: 0,          // OpenFoodFacts has no price data
-      imageUrl: p.image_url ?? '',
+      price:    0,                          // OpenFoodFacts has no price data
+      imageUrl: p.image_url               ?? '',
     }
   } catch (e) {
     console.warn('[productLookup] OpenFoodFacts error:', e)
@@ -146,22 +146,19 @@ async function lookupOpenFoodFacts(barcode: string): Promise<ExternalProductInfo
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 /**
- * Fetch product info from external APIs, trying each in priority order.
- * Returns the first result that has a non-empty product name.
- * Returns null if all three APIs fail — caller should use a fallback name.
+ * Fetch product info, trying each source in priority order.
+ * Returns the first result with a non-empty name.
+ * Returns null when all three fail — caller must supply a fallback name.
  */
 export async function fetchProductFromAPI(
   barcode: string
 ): Promise<ExternalProductInfo | null> {
-  // 1. Barcode Lookup API (best data: has price & images)
-  const fromBL = await lookupBarcodeLookup(barcode)
-  if (hasName(fromBL)) return fromBL
+  const fromEdge = await lookupViaEdgeFunction(barcode)
+  if (hasName(fromEdge)) return fromEdge
 
-  // 2. UPCItemDB (good global coverage, free tier)
   const fromUPC = await lookupUPCItemDB(barcode)
   if (hasName(fromUPC)) return fromUPC
 
-  // 3. OpenFoodFacts (excellent for food/FMCG, no price)
   const fromOFF = await lookupOpenFoodFacts(barcode)
   if (hasName(fromOFF)) return fromOFF
 

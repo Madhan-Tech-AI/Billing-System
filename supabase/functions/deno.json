@@ -1,0 +1,8 @@
+{
+  "tasks": {},
+  "imports": {},
+  "compilerOptions": {
+    "lib": ["deno.window"],
+    "strict": true
+  }
+}
