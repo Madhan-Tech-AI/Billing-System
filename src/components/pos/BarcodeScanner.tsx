@@ -1,18 +1,40 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { BrowserMultiFormatReader } from '@zxing/browser'
-import { NotFoundException, BarcodeFormat, DecodeHintType } from '@zxing/library'
+import { BarcodeFormat, DecodeHintType, NotFoundException } from '@zxing/library'
 import { CheckCircle, Camera, CameraOff, RefreshCcw } from 'lucide-react'
+
+// ─── Constants ────────────────────────────────────────────────────────────────
+
+/** Only accept 13-digit EAN-13 barcodes (supermarket standard) */
+const EAN13_REGEX = /^[0-9]{13}$/
+
+/** Number of consecutive identical reads required before accepting a scan */
+const CONFIRM_FRAMES = 3
+
+/** Minimum milliseconds between accepted scans (prevents duplicate inserts) */
+const SCAN_COOLDOWN_MS = 1500
+
+// ─── Types ────────────────────────────────────────────────────────────────────
 
 interface BarcodeScannerProps {
   onScan: (barcode: string) => void
   sessionId: string
 }
 
+// ─── Component ────────────────────────────────────────────────────────────────
+
 export function BarcodeScanner({ onScan, sessionId }: BarcodeScannerProps) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const controlsRef = useRef<any>(null)
-  const lastScannedRef = useRef<string>('')
-  const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  // Confirmation accumulator: tracks consecutive reads of the same barcode
+  const confirmBufferRef = useRef<{ code: string; count: number }>({ code: '', count: 0 })
+
+  // Cooldown: timestamp of the last accepted scan
+  const lastAcceptedRef = useRef<number>(0)
+
+  // Debounce timer for success overlay reset
+  const successTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const [scanning, setScanning] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -20,113 +42,166 @@ export function BarcodeScanner({ onScan, sessionId }: BarcodeScannerProps) {
   const [showSuccess, setShowSuccess] = useState(false)
   const [cameras, setCameras] = useState<MediaDeviceInfo[]>([])
   const [selectedCamera, setSelectedCamera] = useState<string | null>(null)
+  const [confirming, setConfirming] = useState(0) // 0-3 progress indicator
 
-  const handleDecode = useCallback(
-    (barcode: string) => {
-      if (barcode === lastScannedRef.current) return
+  // ─── Raw frame handler ──────────────────────────────────────────────────────
 
-      lastScannedRef.current = barcode
-      setLastScanned(barcode)
+  const handleRawFrame = useCallback(
+    (rawCode: string) => {
+      // Step 1 — Validate: must be exactly 13 digits (EAN-13)
+      if (!EAN13_REGEX.test(rawCode)) {
+        console.debug('[Scanner] Ignored non-EAN13:', rawCode)
+        return
+      }
+
+      // Step 2 — Multi-frame confirmation: same code must appear CONFIRM_FRAMES times
+      const buf = confirmBufferRef.current
+      if (rawCode === buf.code) {
+        buf.count++
+      } else {
+        // Different code detected — reset buffer
+        buf.code = rawCode
+        buf.count = 1
+      }
+
+      // Update confirmation progress UI (1–3)
+      setConfirming(buf.count)
+
+      if (buf.count < CONFIRM_FRAMES) return
+
+      // Step 3 — Cooldown: reject if same barcode within window
+      const now = Date.now()
+      if (now - lastAcceptedRef.current < SCAN_COOLDOWN_MS) return
+
+      // ✅ Accepted scan
+      lastAcceptedRef.current = now
+      confirmBufferRef.current = { code: '', count: 0 }
+      setConfirming(0)
+
+      setLastScanned(rawCode)
       setShowSuccess(true)
-      onScan(barcode)
+      onScan(rawCode)
 
       if (navigator.vibrate) navigator.vibrate([100, 50, 100])
 
-      if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current)
-      debounceTimerRef.current = setTimeout(() => {
-        lastScannedRef.current = ''
+      if (successTimerRef.current) clearTimeout(successTimerRef.current)
+      successTimerRef.current = setTimeout(() => {
         setShowSuccess(false)
       }, 1500)
     },
     [onScan]
   )
 
+  // ─── Camera + ZXing reader setup ────────────────────────────────────────────
+
   useEffect(() => {
-    // Initial device list (might be empty labels before permission)
-    BrowserMultiFormatReader.listVideoInputDevices().then((devices) => {
-      setCameras(devices)
-    }).catch(console.error)
+    BrowserMultiFormatReader.listVideoInputDevices()
+      .then(setCameras)
+      .catch(console.error)
   }, [])
 
   useEffect(() => {
     if (!videoRef.current) return
 
-    // Configure hints for 1D barcodes and better sensitivity
+    // Only EAN-13 format — eliminates partial reads (EAN-8, UPC, CODE128, etc.)
     const hints = new Map()
-    const formats = [
-      BarcodeFormat.EAN_13,
-      BarcodeFormat.EAN_8,
-      BarcodeFormat.UPC_A,
-      BarcodeFormat.UPC_E,
-      BarcodeFormat.CODE_128,
-      BarcodeFormat.CODE_39,
-      BarcodeFormat.ITF
-    ]
-    hints.set(DecodeHintType.POSSIBLE_FORMATS, formats)
+    hints.set(DecodeHintType.POSSIBLE_FORMATS, [BarcodeFormat.EAN_13])
     hints.set(DecodeHintType.TRY_HARDER, true)
 
     const reader = new BrowserMultiFormatReader(hints)
     setScanning(true)
     setError(null)
 
-    // Use environment camera by default if no specific camera selected
-    const constraints: MediaStreamConstraints = selectedCamera
-      ? { video: { deviceId: selectedCamera } }
-      : { video: { facingMode: { exact: 'environment' } } }
+    // HD rear camera constraints for maximum decode accuracy
+    const exactConstraints: MediaStreamConstraints = selectedCamera
+      ? { video: { deviceId: { exact: selectedCamera } } }
+      : {
+          video: {
+            facingMode: { exact: 'environment' },
+            width: { ideal: 1280 },
+            height: { ideal: 720 },
+          },
+        }
 
-    // Fallback constraints if 'exact' environment fails (some browsers/devices)
-    const fallbackConstraints: MediaStreamConstraints = selectedCamera
+    const softConstraints: MediaStreamConstraints = selectedCamera
       ? { video: { deviceId: selectedCamera } }
-      : { video: { facingMode: 'environment' } }
+      : {
+          video: {
+            facingMode: 'environment',
+            width: { ideal: 1280 },
+            height: { ideal: 720 },
+          },
+        }
 
     async function startScanning(cons: MediaStreamConstraints) {
       try {
-        const controls = await reader.decodeFromConstraints(cons, videoRef.current!, (result, err) => {
-          if (result) {
-            handleDecode(result.getText())
+        const controls = await reader.decodeFromConstraints(
+          cons,
+          videoRef.current!,
+          (result, err) => {
+            if (result) handleRawFrame(result.getText())
+            if (err && !(err instanceof NotFoundException)) {
+              // Suppress common "no barcode in frame" noise
+            }
           }
-          if (err && !(err instanceof NotFoundException)) {
-            // Ignore common scan errors
-          }
-        })
+        )
         controlsRef.current = controls
 
-        // Now that permission is granted, refresh camera list to get labels
+        // Re-fetch device list now that permission is granted (gets labels)
         const devices = await BrowserMultiFormatReader.listVideoInputDevices()
         setCameras(devices)
       } catch (e: any) {
-        if (cons === constraints && !selectedCamera) {
-          // Try fallback without 'exact'
-          startScanning(fallbackConstraints)
+        // Retry once with softer constraints before showing error
+        if (cons === exactConstraints) {
+          startScanning(softConstraints)
           return
         }
         setError(
           e.name === 'NotAllowedError'
-            ? 'Camera permission denied. Please allow camera access.'
-            : e.name === 'OverconstrainedError' 
-            ? 'No back camera found. Trying default camera...'
+            ? 'Camera permission denied. Please allow camera access in your browser.'
+            : e.name === 'OverconstrainedError'
+            ? 'No back camera found. Switch camera below.'
             : `Camera error: ${e.message}`
         )
         setScanning(false)
       }
     }
 
-    startScanning(constraints)
+    startScanning(exactConstraints)
 
     return () => {
-      if (controlsRef.current) {
-        controlsRef.current.stop()
-        controlsRef.current = null
-      }
+      controlsRef.current?.stop()
+      controlsRef.current = null
       setScanning(false)
     }
-  }, [selectedCamera, handleDecode])
+  }, [selectedCamera, handleRawFrame])
+
+  // ─── Switch camera ───────────────────────────────────────────────────────────
 
   function switchCamera() {
     const idx = cameras.findIndex((c) => c.deviceId === selectedCamera)
     const next = cameras[(idx + 1) % cameras.length]
-    setSelectedCamera(next.deviceId)
+    setSelectedCamera(next?.deviceId ?? null)
   }
+
+  // ─── Confirmation dots UI ────────────────────────────────────────────────────
+
+  function ConfirmDots() {
+    return (
+      <div className="absolute bottom-3 left-1/2 -translate-x-1/2 flex gap-1.5">
+        {Array.from({ length: CONFIRM_FRAMES }).map((_, i) => (
+          <div
+            key={i}
+            className={`w-2 h-2 rounded-full transition-all duration-150 ${
+              i < confirming ? 'bg-amber-400 scale-110' : 'bg-surface-600'
+            }`}
+          />
+        ))}
+      </div>
+    )
+  }
+
+  // ─── Render ──────────────────────────────────────────────────────────────────
 
   return (
     <div className="flex flex-col items-center w-full h-full">
@@ -144,10 +219,10 @@ export function BarcodeScanner({ onScan, sessionId }: BarcodeScannerProps) {
           muted
         />
 
-        {/* Scanner overlay */}
+        {/* Scanner overlay frame */}
         <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-          <div className="relative w-48 h-48">
-            {/* Corner brackets */}
+          <div className="relative w-48 h-32">
+            {/* Corner brackets — wider aspect ratio suits EAN-13 */}
             {[
               'top-0 left-0 border-t-4 border-l-4 rounded-tl-lg',
               'top-0 right-0 border-t-4 border-r-4 rounded-tr-lg',
@@ -156,11 +231,13 @@ export function BarcodeScanner({ onScan, sessionId }: BarcodeScannerProps) {
             ].map((cls, i) => (
               <div
                 key={i}
-                className={`absolute w-8 h-8 ${cls} ${showSuccess ? 'border-emerald-400' : 'border-primary-400'} transition-colors duration-300`}
+                className={`absolute w-8 h-8 ${cls} ${
+                  showSuccess ? 'border-emerald-400' : confirming > 0 ? 'border-amber-400' : 'border-primary-400'
+                } transition-colors duration-200`}
               />
             ))}
 
-            {/* Scan line */}
+            {/* Animated scan line */}
             {scanning && !showSuccess && (
               <div
                 className="absolute left-0 right-0 h-0.5 bg-primary-400 opacity-80 animate-scanner-line"
@@ -170,14 +247,17 @@ export function BarcodeScanner({ onScan, sessionId }: BarcodeScannerProps) {
           </div>
         </div>
 
-        {/* Success overlay */}
+        {/* Confirmation progress dots */}
+        {confirming > 0 && !showSuccess && <ConfirmDots />}
+
+        {/* Success flash overlay */}
         {showSuccess && (
           <div className="absolute inset-0 bg-emerald-500/20 flex items-center justify-center animate-fade-in">
             <CheckCircle className="w-16 h-16 text-emerald-400 drop-shadow-lg" />
           </div>
         )}
 
-        {/* Error overlay */}
+        {/* Camera error overlay */}
         {error && (
           <div className="absolute inset-0 bg-black/80 flex flex-col items-center justify-center gap-3 p-4 text-center">
             <CameraOff className="w-10 h-10 text-red-400" />
@@ -185,6 +265,7 @@ export function BarcodeScanner({ onScan, sessionId }: BarcodeScannerProps) {
           </div>
         )}
 
+        {/* Initialising overlay */}
         {!scanning && !error && (
           <div className="absolute inset-0 bg-black/80 flex items-center justify-center">
             <Camera className="w-12 h-12 text-surface-500 animate-pulse" />
@@ -192,7 +273,7 @@ export function BarcodeScanner({ onScan, sessionId }: BarcodeScannerProps) {
         )}
       </div>
 
-      {/* Controls */}
+      {/* Camera switch */}
       <div className="mt-4 flex gap-3">
         {cameras.length > 1 && (
           <button
@@ -206,18 +287,23 @@ export function BarcodeScanner({ onScan, sessionId }: BarcodeScannerProps) {
         )}
       </div>
 
-      {/* Last scanned */}
+      {/* Last scanned barcode */}
       {lastScanned && (
         <div className="mt-4 w-full max-w-sm p-3 rounded-xl bg-surface-800/60 border border-white/10">
           <p className="text-xs text-surface-400 font-medium uppercase tracking-wider mb-1">Last Scanned</p>
-          <p className="font-mono text-primary-300 font-semibold">{lastScanned}</p>
+          <p className="font-mono text-primary-300 font-semibold text-lg tracking-widest">{lastScanned}</p>
           {showSuccess && (
             <p className="text-xs text-emerald-400 mt-1 flex items-center gap-1">
-              <CheckCircle className="w-3 h-3" /> Item added to cart ✓
+              <CheckCircle className="w-3 h-3" /> Sent to billing terminal ✓
             </p>
           )}
         </div>
       )}
+
+      {/* Hint text */}
+      <p className="mt-3 text-xs text-surface-600 text-center max-w-xs">
+        Hold barcode steady inside the frame — confirmed after {CONFIRM_FRAMES} reads
+      </p>
     </div>
   )
 }

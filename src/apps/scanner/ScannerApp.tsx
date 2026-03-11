@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { ShoppingCart, Wifi, WifiOff, CheckCircle2 } from 'lucide-react'
+import { ShoppingCart, Wifi, WifiOff, CheckCircle2, AlertCircle } from 'lucide-react'
 import { BarcodeScanner } from '../../components/pos/BarcodeScanner'
 import { insertScanEvent } from '../../services/scannerService'
 import { getProductByBarcode } from '../../services/productService'
@@ -12,8 +12,10 @@ export default function ScannerApp() {
 
   const [connected, setConnected] = useState(false)
   const [lastProduct, setLastProduct] = useState<Product | null>(null)
+  const [lastBarcode, setLastBarcode] = useState<string | null>(null)
   const [scanCount, setScanCount] = useState(0)
   const [error, setError] = useState<string | null>(null)
+  const [lookingUp, setLookingUp] = useState(false)
 
   useEffect(() => {
     if (sessionId) setConnected(true)
@@ -22,22 +24,53 @@ export default function ScannerApp() {
   const handleScan = useCallback(
     async (barcode: string) => {
       if (!sessionId) {
-        setError('No session ID found in URL. Please re-scan the QR code from the billing terminal.')
+        setError('No session ID. Please re-scan the QR code from the billing terminal.')
         return
       }
+
       setError(null)
+      setLastBarcode(barcode)
+      setLookingUp(true)
+
       try {
-        await insertScanEvent(sessionId, barcode)
+        // Insert scan event into Supabase — triggers realtime on billing terminal
+        const { error: insertError } = await (async () => {
+          try {
+            await insertScanEvent(sessionId, barcode)
+            return { error: null }
+          } catch (e) {
+            // Detailed error logging for debugging network / CORS issues
+            console.error('[Scanner] Supabase insertScanEvent failed:', e)
+            return { error: e }
+          }
+        })()
+
+        if (insertError) {
+          const msg = insertError instanceof Error ? insertError.message : String(insertError)
+          setError(`Failed to send scan: ${msg}`)
+          setLookingUp(false)
+          return
+        }
+
         setScanCount((c) => c + 1)
-        // Optionally show product name
-        const product = await getProductByBarcode(barcode)
-        setLastProduct(product)
-      } catch (err) {
-        setError(err instanceof Error ? err.message : 'Failed to send scan. Check network.')
+
+        // Show product name on scanner for cashier feedback
+        try {
+          const product = await getProductByBarcode(barcode)
+          setLastProduct(product)
+        } catch (lookupErr) {
+          // Product lookup is display-only — non-fatal
+          console.warn('[Scanner] Product lookup failed (display only):', lookupErr)
+          setLastProduct(null)
+        }
+      } finally {
+        setLookingUp(false)
       }
     },
     [sessionId]
   )
+
+  // ─── No session screen ────────────────────────────────────────────────────
 
   if (!sessionId) {
     return (
@@ -50,6 +83,8 @@ export default function ScannerApp() {
       </div>
     )
   }
+
+  // ─── Main scanner screen ───────────────────────────────────────────────────
 
   return (
     <div className="min-h-screen bg-surface-950 flex flex-col">
@@ -64,7 +99,11 @@ export default function ScannerApp() {
             <p className="text-xs text-surface-500">Mobile Barcode Scanner</p>
           </div>
         </div>
-        <div className={`flex items-center gap-1.5 text-xs font-medium px-2.5 py-1.5 rounded-full ${connected ? 'bg-emerald-500/20 text-emerald-400' : 'bg-red-500/20 text-red-400'}`}>
+        <div
+          className={`flex items-center gap-1.5 text-xs font-medium px-2.5 py-1.5 rounded-full ${
+            connected ? 'bg-emerald-500/20 text-emerald-400' : 'bg-red-500/20 text-red-400'
+          }`}
+        >
           {connected ? <Wifi className="w-3 h-3" /> : <WifiOff className="w-3 h-3" />}
           {connected ? 'Live' : 'Offline'}
         </div>
@@ -74,26 +113,45 @@ export default function ScannerApp() {
       <div className="flex-1 flex flex-col items-center px-4 py-6">
         <BarcodeScanner onScan={handleScan} sessionId={sessionId} />
 
-        {/* Scan counter */}
-        <div className="mt-6 glass-dark rounded-2xl p-4 w-full max-w-sm text-center">
-          <div className="flex items-center justify-center gap-2 mb-1">
+        {/* Scan result card */}
+        <div className="mt-6 glass-dark rounded-2xl p-4 w-full max-w-sm">
+          <div className="flex items-center justify-center gap-2 mb-2">
             <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-            <span className="text-sm font-semibold text-white">{scanCount} item{scanCount !== 1 ? 's' : ''} scanned</span>
+            <span className="text-sm font-semibold text-white">
+              {scanCount} item{scanCount !== 1 ? 's' : ''} scanned
+            </span>
           </div>
-          {lastProduct && (
-            <div className="mt-2 pt-2 border-t border-white/10">
-              <p className="text-xs text-surface-400 mb-0.5">Last item</p>
-              <p className="text-primary-300 font-semibold text-sm">{lastProduct.name}</p>
-              <p className="text-surface-400 text-xs">₹{lastProduct.price.toFixed(2)}</p>
-            </div>
+
+          {lookingUp && (
+            <p className="text-xs text-amber-400 text-center animate-pulse mt-1">
+              🔍 Looking up product…
+            </p>
           )}
-          {!lastProduct && scanCount > 0 && (
-            <p className="text-xs text-amber-400 mt-1">⚠️ Product not found in database</p>
+
+          {lastBarcode && !lookingUp && (
+            <div className="mt-2 pt-2 border-t border-white/10">
+              <p className="text-xs text-surface-500 mb-0.5">Last barcode</p>
+              <p className="font-mono text-xs text-surface-400 tracking-widest">{lastBarcode}</p>
+              {lastProduct ? (
+                <>
+                  <p className="text-primary-300 font-semibold text-sm mt-1">{lastProduct.name}</p>
+                  <p className="text-surface-400 text-xs">₹{lastProduct.price.toFixed(2)}</p>
+                </>
+              ) : (
+                scanCount > 0 && (
+                  <p className="text-xs text-amber-400 mt-1">
+                    ⚠️ Unknown product — being auto-created on terminal
+                  </p>
+                )
+              )}
+            </div>
           )}
         </div>
 
+        {/* Error display */}
         {error && (
-          <div className="mt-4 w-full max-w-sm p-3 rounded-xl bg-red-500/10 border border-red-500/30">
+          <div className="mt-4 w-full max-w-sm p-3 rounded-xl bg-red-500/10 border border-red-500/30 flex items-start gap-2">
+            <AlertCircle className="w-4 h-4 text-red-400 flex-shrink-0 mt-0.5" />
             <p className="text-sm text-red-300">{error}</p>
           </div>
         )}
