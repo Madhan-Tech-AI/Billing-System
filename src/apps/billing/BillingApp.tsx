@@ -14,7 +14,7 @@ import { useProductStore } from '../../stores/productStore'
 import { useSessionStore } from '../../stores/sessionStore'
 import { subscribeToScanEvents, unsubscribeChannel } from '../../services/scannerService'
 import { getProductByBarcode } from '../../services/productService'
-import { createProductFromBarcode } from '../../services/productAutoCreate'
+import { createProductFromBarcode, enrichProductIfPlaceholder } from '../../services/productAutoCreate'
 import type { RealtimeChannel } from '@supabase/supabase-js'
 import type { CartItem } from '../../supabase/types'
 
@@ -56,10 +56,26 @@ export default function BillingApp() {
     if (!barcode.trim()) return
 
     // 1. Check in-memory product cache (fastest path)
-    const cached = getByBarcode(barcode)
+    let cached = getByBarcode(barcode)
     if (cached) {
+      // Re-enrich if it's a placeholder (inserted before API was working)
+      if (cached.price === 0 && cached.name.startsWith(`Product ${barcode}`)) {
+        showNotification(`🔄 Looking up product info…`)
+        try {
+          const enriched = await enrichProductIfPlaceholder(cached)
+          addToCache(enriched)
+          addItem(enriched)
+          const priceNote = enriched.price > 0 ? ` — ₹${enriched.price.toFixed(2)}` : ' — set price in Admin'
+          showNotification(`✅ ${enriched.name} added${priceNote}`)
+        } catch {
+          addItem(cached)
+          showNotification(`✅ ${cached.name} added — set price in Admin`)
+        }
+        return
+      }
       addItem(cached)
-      showNotification(`✅ ${cached.name} added`)
+      const priceNote = cached.price > 0 ? ` — ₹${cached.price.toFixed(2)}` : ' — price: ₹0'
+      showNotification(`✅ ${cached.name} added${priceNote}`)
       return
     }
 
@@ -69,9 +85,12 @@ export default function BillingApp() {
       // 2. Query Supabase products table
       const found = await getProductByBarcode(barcode)
       if (found) {
-        addToCache(found)
-        addItem(found)
-        showNotification(`✅ ${found.name} added`)
+        // Re-enrich placeholder products before adding to cart
+        const product = await enrichProductIfPlaceholder(found)
+        addToCache(product)
+        addItem(product)
+        const priceNote = product.price > 0 ? ` — ₹${product.price.toFixed(2)}` : ' — set price in Admin'
+        showNotification(`✅ ${product.name} added${priceNote}`)
         return
       }
 
@@ -80,7 +99,8 @@ export default function BillingApp() {
       const created = await createProductFromBarcode(barcode)
       addToCache(created)
       addItem(created)
-      showNotification(`🆕 New product created: ${created.name}`)
+      const priceNote = created.price > 0 ? ` — ₹${created.price.toFixed(2)}` : ' — set price in Admin'
+      showNotification(`🆕 ${created.name} added${priceNote}`)
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Unknown error'
       showNotification(`⚠️ Failed to process barcode: ${msg}`)

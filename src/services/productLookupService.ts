@@ -1,88 +1,76 @@
 /**
  * productLookupService.ts
  *
- * Fetches product info for a barcode via three sources in priority order:
+ * Fetches product info for a barcode from three sources simultaneously,
+ * then merges the best name + best price across all results.
  *
- *   1. Barcode-Api  (Supabase Edge Function — keeps API key server-side)
- *   2. UPCItemDB    (free, good global coverage)
- *   3. OpenFoodFacts(open-source, excellent for food/FMCG)
+ * Priority for name:  /api/barcode (Vercel) → UPCItemDB → OpenFoodFacts
+ * Priority for price: first source with price > 0
  */
 
 export interface ExternalProductInfo {
   name: string
   brand: string
   category: string
-  price: number     // 0 when unavailable
-  imageUrl: string  // empty string when unavailable
+  price: number     // 0 when no source has a price
+  imageUrl: string
 }
 
-const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL as string
-const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY as string
+// ─── 1. Vercel /api/barcode route (primary — API key is server-side) ─────────
 
-/** Returns true when the result contains a usable product name */
-function hasName(info: ExternalProductInfo | null): info is ExternalProductInfo {
-  return !!info?.name?.trim()
-}
-
-// ─── 1. Supabase Edge Function (primary — API key is secret, server-side) ───
-
-async function lookupViaEdgeFunction(
-  barcode: string
-): Promise<ExternalProductInfo | null> {
+async function lookupViaVercelApi(barcode: string): Promise<ExternalProductInfo | null> {
   try {
-    const res = await fetch(
-      `${SUPABASE_URL}/functions/v1/Barcode-Api?barcode=${encodeURIComponent(barcode)}`,
-      {
-        headers: {
-          'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
-          'Content-Type': 'application/json',
-        },
-      }
-    )
+    const res = await fetch(`/api/barcode?barcode=${encodeURIComponent(barcode)}`)
 
-    if (res.status === 404) return null          // product not in Barcode Lookup DB
-    if (res.status === 429) {
-      console.warn('[productLookup] Edge function rate-limited by Barcode Lookup API')
-      return null
-    }
-    if (!res.ok) {
-      console.warn(`[productLookup] Edge function responded ${res.status}`)
-      return null
-    }
+    console.debug(`[/api/barcode] status=${res.status} for ${barcode}`)
+
+    if (res.status === 404) return null
+    if (res.status === 429) { console.warn('[/api/barcode] rate-limited'); return null }
+    if (!res.ok) { console.warn(`[/api/barcode] error ${res.status}`); return null }
 
     const json = await res.json()
     const p = json?.products?.[0]
-    if (!p) return null
+    if (!p) { console.debug('[/api/barcode] no products in response'); return null }
 
-    // Extract the first store price that is a positive number
+    // Extract best store price (regular price, then sale price)
     let price = 0
     if (Array.isArray(p.stores)) {
       for (const store of p.stores) {
-        const raw = parseFloat(store.price)
-        if (!isNaN(raw) && raw > 0) { price = raw; break }
+        const regular  = parseFloat(store.price)
+        const sale     = parseFloat(store.sale_price)
+        const best     = regular > 0 ? regular : (sale > 0 ? sale : 0)
+        if (best > 0) { price = best; break }
       }
+      if (price === 0 && p.stores.length > 0) {
+        console.debug('[/api/barcode] stores found but all prices are 0 or missing')
+      }
+    } else {
+      console.debug('[/api/barcode] no store listings — price will be 0')
     }
 
-    return {
-      name:     p.title?.trim()    ?? '',
-      brand:    p.brand?.trim()    ?? '',
-      category: p.category?.trim() ?? '',
+    const result: ExternalProductInfo = {
+      name:     (p.title  || p.brand || '').trim(),
+      brand:    (p.brand  || '').trim(),
+      category: (p.category || '').trim(),
       price,
-      imageUrl: p.images?.[0]      ?? '',
+      imageUrl: p.images?.[0] ?? '',
     }
+    console.debug('[/api/barcode] result:', result)
+    return result
   } catch (e) {
-    console.error('[productLookup] Edge function error:', e)
+    console.error('[/api/barcode] fetch error:', e)
     return null
   }
 }
 
-// ─── 2. UPCItemDB (first free fallback) ──────────────────────────────────────
+// ─── 2. UPCItemDB (free fallback) ────────────────────────────────────────────
 
 async function lookupUPCItemDB(barcode: string): Promise<ExternalProductInfo | null> {
   try {
     const res = await fetch(
       `https://api.upcitemdb.com/prod/trial/lookup?upc=${encodeURIComponent(barcode)}`
     )
+    console.debug(`[UPCItemDB] status=${res.status} for ${barcode}`)
     if (!res.ok) return null
 
     const json = await res.json()
@@ -98,69 +86,102 @@ async function lookupUPCItemDB(barcode: string): Promise<ExternalProductInfo | n
     }
 
     return {
-      name:     item.title?.trim()    ?? '',
-      brand:    item.brand?.trim()    ?? '',
-      category: item.category?.trim() ?? '',
+      name:     (item.title    || '').trim(),
+      brand:    (item.brand    || '').trim(),
+      category: (item.category || '').trim(),
       price,
-      imageUrl: item.images?.[0]      ?? '',
+      imageUrl: item.images?.[0] ?? '',
     }
   } catch (e) {
-    console.warn('[productLookup] UPCItemDB error:', e)
+    console.warn('[UPCItemDB] error:', e)
     return null
   }
 }
 
-// ─── 3. OpenFoodFacts (second free fallback — food & FMCG) ───────────────────
+// ─── 3. OpenFoodFacts (free fallback — food & FMCG) ──────────────────────────
 
 async function lookupOpenFoodFacts(barcode: string): Promise<ExternalProductInfo | null> {
   try {
     const res = await fetch(
       `https://world.openfoodfacts.org/api/v0/product/${encodeURIComponent(barcode)}.json`
     )
+    console.debug(`[OpenFoodFacts] status=${res.status} for ${barcode}`)
     if (!res.ok) return null
 
     const json = await res.json()
     if (json.status !== 1 || !json.product) return null
 
-    const p = json.product
+    const p   = json.product
     const name = (
-      p.product_name_en ||
-      p.product_name   ||
+      p.product_name_en          ||
+      p.product_name             ||
       p.abbreviated_product_name ||
+      p.generic_name_en          ||
+      p.generic_name             ||
       ''
     ).trim()
 
     return {
       name,
-      brand:    p.brands?.trim()    ?? '',
-      category: p.categories?.trim() ?? '',
-      price:    0,                          // OpenFoodFacts has no price data
-      imageUrl: p.image_url               ?? '',
+      brand:    (p.brands     || '').split(',')[0].trim(),
+      category: (p.categories || '').split(',')[0].trim(),
+      price:    0,
+      imageUrl: p.image_front_url || p.image_url || '',
     }
   } catch (e) {
-    console.warn('[productLookup] OpenFoodFacts error:', e)
+    console.warn('[OpenFoodFacts] error:', e)
     return null
   }
 }
 
-// ─── Public API ───────────────────────────────────────────────────────────────
+// ─── Public: parallel fetch + smart merge ─────────────────────────────────────
 
 /**
- * Fetch product info, trying each source in priority order.
- * Returns the first result with a non-empty name.
- * Returns null when all three fail — caller must supply a fallback name.
+ * Calls all three sources simultaneously and merges the best data:
+ *  Name  → /api/barcode → UPCItemDB → OpenFoodFacts
+ *  Price → first source with price > 0
+ *
+ * Returns null if no source has a product name.
  */
 export async function fetchProductFromAPI(
   barcode: string
 ): Promise<ExternalProductInfo | null> {
-  const fromEdge = await lookupViaEdgeFunction(barcode)
-  if (hasName(fromEdge)) return fromEdge
+  console.info(`[productLookup] Starting parallel lookup for barcode: ${barcode}`)
 
-  const fromUPC = await lookupUPCItemDB(barcode)
-  if (hasName(fromUPC)) return fromUPC
+  const [vercelResult, upcResult, offResult] = await Promise.allSettled([
+    lookupViaVercelApi(barcode),
+    lookupUPCItemDB(barcode),
+    lookupOpenFoodFacts(barcode),
+  ])
 
-  const fromOFF = await lookupOpenFoodFacts(barcode)
-  if (hasName(fromOFF)) return fromOFF
+  const vercel = vercelResult.status === 'fulfilled' ? vercelResult.value : null
+  const upc    = upcResult.status    === 'fulfilled' ? upcResult.value    : null
+  const off    = offResult.status    === 'fulfilled' ? offResult.value    : null
 
-  return null
+  console.info('[productLookup] Results →', {
+    vercel: vercel ? `"${vercel.name}" price=${vercel.price}` : null,
+    upc:    upc    ? `"${upc.name}"    price=${upc.price}`    : null,
+    off:    off    ? `"${off.name}"    price=${off.price}`    : null,
+  })
+
+  // Best name: priority order
+  const bestNameSource = [vercel, upc, off].find((r) => r?.name?.trim())
+  if (!bestNameSource) {
+    console.warn('[productLookup] Product not found in any API for barcode:', barcode)
+    return null
+  }
+
+  // Best price: take the first source that has a positive price
+  const bestPrice = [vercel, upc, off].find((r) => r && r.price > 0)?.price ?? 0
+  if (bestPrice === 0) {
+    console.warn('[productLookup] Price not available — set manually in Admin dashboard')
+  }
+
+  return {
+    name:     bestNameSource.name,
+    brand:    bestNameSource.brand,
+    category: bestNameSource.category,
+    price:    bestPrice,
+    imageUrl: bestNameSource.imageUrl,
+  }
 }

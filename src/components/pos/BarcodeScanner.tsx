@@ -9,10 +9,10 @@ import { CheckCircle, Camera, CameraOff, RefreshCcw } from 'lucide-react'
 const EAN13_REGEX = /^[0-9]{13}$/
 
 /** Number of consecutive identical reads required before accepting a scan */
-const CONFIRM_FRAMES = 3
+const CONFIRM_FRAMES = 2
 
 /** Minimum milliseconds between accepted scans (prevents duplicate inserts) */
-const SCAN_COOLDOWN_MS = 1500
+const SCAN_COOLDOWN_MS = 800
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -302,7 +302,7 @@ export function BarcodeScanner({ onScan, sessionId }: BarcodeScannerProps) {
 
       {/* Hint text */}
       <p className="mt-3 text-xs text-surface-600 text-center max-w-xs">
-        Hold barcode steady inside the frame — confirmed after {CONFIRM_FRAMES} reads
+        Hold barcode steady — scans after {CONFIRM_FRAMES} consecutive reads
       </p>
     </div>
   )
