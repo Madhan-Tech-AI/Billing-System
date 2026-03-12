@@ -5,7 +5,9 @@ export interface Product {
   price: number
   gst: number
   stock: number
+  brand?: string
   category: string
+  image?: string
   created_at: string
 }
 
@@ -18,6 +20,8 @@ export interface CartItem {
   quantity: number
   subtotal: number
   gstAmount: number
+  brand?: string
+  image?: string
 }
 
 export interface ScanEvent {

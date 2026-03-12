@@ -10,7 +10,6 @@
  * previously-inserted placeholder (name="Product {barcode}", price=0).
  */
 
-import { addProduct, updateProduct } from './productService'
 import { fetchProductFromAPI } from './productLookupService'
 import type { Product } from '../supabase/types'
 
@@ -25,76 +24,35 @@ export function isPlaceholder(product: Product): boolean {
   )
 }
 
-/** Build product fields from API info + defaults */
-async function buildProductFields(
-  barcode: string
-): Promise<Omit<Product, 'id' | 'created_at'>> {
-  const apiInfo = await fetchProductFromAPI(barcode)
-
-  // ── Name ──────────────────────────────────────────────────────────────────
-  let name = apiInfo?.name?.trim() || `Product ${barcode}`
-  const brand = apiInfo?.brand?.trim() ?? ''
-  if (brand && !name.toLowerCase().includes(brand.toLowerCase())) {
-    name = `${brand} ${name}`
-  }
-
-  // ── Price ─────────────────────────────────────────────────────────────────
-  const price = apiInfo?.price && apiInfo.price > 0 ? apiInfo.price : 0
-
-  // ── Category ──────────────────────────────────────────────────────────────
-  const category = apiInfo?.category?.trim() || 'Uncategorised'
-
-  const fields: Omit<Product, 'id' | 'created_at'> = {
-    barcode,
-    name,
-    price,
-    gst: 18,
-    stock: 100,
-    category,
-  }
-
-  console.info('[productAutoCreate] Product fields from API:', fields)
-  return fields
-}
-
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 /**
- * Looks up barcode via external APIs, inserts into Supabase,
- * and returns the newly created Product.
+ * Looks up barcode via the consolidated Vercel API.
+ * The backend now handles searching SerpAPI, AI extraction, and DB insertion.
  */
 export async function createProductFromBarcode(barcode: string): Promise<Product> {
-  const fields = await buildProductFields(barcode)
-  const inserted = await addProduct(fields)
-  return inserted
+  const product = await fetchProductFromAPI(barcode)
+  if (!product) {
+    throw new Error('Product not discovered after multi-source lookup')
+  }
+  return product
 }
 
 /**
  * If the given product is a placeholder (price=0, generic name), re-fetch
- * real product info from the API and update the Supabase row in-place.
- * Returns the enriched product, or the original if the API returns nothing new.
+ * real product info from the API. The API will update the DB row in-place.
  */
 export async function enrichProductIfPlaceholder(product: Product): Promise<Product> {
   if (!isPlaceholder(product)) return product
 
   console.info('[productAutoCreate] Placeholder detected — re-fetching from API:', product.barcode)
 
-  const fields = await buildProductFields(product.barcode)
-
-  // Only update if we got better data
-  const gotBetterName = !fields.name.startsWith(`Product ${product.barcode}`)
-  const gotPrice = fields.price > 0
-
-  if (!gotBetterName && !gotPrice) {
+  const enriched = await fetchProductFromAPI(product.barcode)
+  
+  if (!enriched || (enriched.price === 0 && enriched.name === product.name)) {
     console.warn('[productAutoCreate] API returned no improvement for:', product.barcode)
     return product
   }
 
-  const updated = await updateProduct(product.id, {
-    name: fields.name,
-    price: fields.price,
-    category: fields.category,
-  })
-
-  return updated
+  return enriched
 }

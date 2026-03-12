@@ -18,9 +18,29 @@ function CartItemRow({ item }: CartItemRowProps) {
     <tr className="border-b border-white/5 hover:bg-white/5 transition-colors group">
       {/* Product name — read-only */}
       <td className="table-cell">
-        <div>
-          <p className="font-medium text-white text-sm">{item.name}</p>
-          <p className="text-xs text-surface-400 font-mono">{item.barcode}</p>
+        <div className="flex items-center gap-3">
+          {item.image && (
+            <img 
+              src={item.image} 
+              alt={item.name} 
+              className="w-10 h-10 rounded-lg object-cover border border-white/10 flex-shrink-0"
+              onError={(e) => (e.currentTarget.style.display = 'none')}
+            />
+          )}
+          {!item.image && (
+            <div className="w-10 h-10 rounded-lg bg-surface-800 border border-white/5 flex items-center justify-center flex-shrink-0">
+              <Plus className="w-4 h-4 text-surface-600" />
+            </div>
+          )}
+          <div className="min-w-0 flex-1">
+            <p className="font-medium text-white text-sm truncate">{item.name}</p>
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] font-mono text-surface-400 bg-surface-800 px-1.5 py-0.5 rounded border border-white/5">{item.barcode}</span>
+              {item.brand && (
+                <span className="text-[10px] font-semibold text-primary-400 uppercase tracking-wider">{item.brand}</span>
+              )}
+            </div>
+          </div>
         </div>
       </td>
 

@@ -5,15 +5,9 @@
  * This solves CORS issues and keeps API keys on the server.
  */
 
-export interface ExternalProductInfo {
-  name: string
-  brand: string
-  category: string
-  price: number     // 0 when no source has a price
-  imageUrl: string
-}
+import type { Product } from '../supabase/types'
 
-async function lookupViaVercelApi(barcode: string): Promise<ExternalProductInfo | null> {
+async function lookupViaVercelApi(barcode: string): Promise<Product | null> {
   try {
     const res = await fetch(`/api/barcode?barcode=${encodeURIComponent(barcode)}`)
 
@@ -27,13 +21,8 @@ async function lookupViaVercelApi(barcode: string): Promise<ExternalProductInfo 
     const p = json?.products?.[0]
     if (!p) return null
 
-    return {
-      name: (p.title || p.brand || '').trim(),
-      brand: (p.brand || '').trim(),
-      category: (p.category || '').trim(),
-      price: typeof p.price === 'number' ? p.price : parseFloat(p.price || '0'),
-      imageUrl: p.images?.[0] ?? '',
-    }
+    // The backend now returns the full Product object (either found in DB or newly inserted)
+    return p as Product
   } catch (e) {
     console.error('[productLookup] fetch error:', e)
     return null
@@ -45,21 +34,21 @@ async function lookupViaVercelApi(barcode: string): Promise<ExternalProductInfo 
  */
 export async function fetchProductFromAPI(
   barcode: string
-): Promise<ExternalProductInfo | null> {
+): Promise<Product | null> {
   console.info(`[productLookup] Starting lookup for barcode: ${barcode}`)
   
-  const result = await lookupViaVercelApi(barcode)
+  const product = await lookupViaVercelApi(barcode)
 
-  if (!result || !result.name) {
+  if (!product) {
     console.warn('[productLookup] Product not found for barcode:', barcode)
     return null
   }
 
   console.info('[productLookup] Result →', {
-    name: result.name,
-    price: result.price,
-    sources: (result as any)._metadata?.sources
+    name: product.name,
+    price: product.price,
+    source: (product as any)._source // Optional metadata from backend
   })
 
-  return result
+  return product
 }

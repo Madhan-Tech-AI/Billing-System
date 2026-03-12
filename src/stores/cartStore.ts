@@ -43,6 +43,8 @@ export const useCartStore = create<CartStore>((set, get) => ({
         quantity: 1,
         subtotal: product.price,
         gstAmount,
+        brand: product.brand,
+        image: product.image,
       }
       return { items: [...state.items, newItem] }
     })

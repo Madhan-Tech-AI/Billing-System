@@ -151,10 +151,12 @@ function ProductForm({
   const [form, setForm] = useState({
     barcode: product?.barcode ?? '',
     name: product?.name ?? '',
+    brand: product?.brand ?? '',
     price: product?.price?.toString() ?? '',
     gst: product?.gst?.toString() ?? '0',
     stock: product?.stock?.toString() ?? '0',
     category: product?.category ?? '',
+    image: product?.image ?? '',
   })
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -167,10 +169,12 @@ function ProductForm({
       const data = {
         barcode: form.barcode,
         name: form.name,
+        brand: form.brand,
         price: parseFloat(form.price),
         gst: parseFloat(form.gst),
         stock: parseInt(form.stock, 10),
         category: form.category,
+        image: form.image,
       }
       let saved: Product
       if (product) {
@@ -189,10 +193,12 @@ function ProductForm({
   const fields = [
     { key: 'barcode', label: 'Barcode', placeholder: '8901234567890', type: 'text' },
     { key: 'name', label: 'Product Name', placeholder: 'Milk 500ml', type: 'text' },
+    { key: 'brand', label: 'Brand', placeholder: 'Amul', type: 'text' },
     { key: 'price', label: 'Price (₹)', placeholder: '45.00', type: 'number' },
-    { key: 'gst', label: 'GST (%)', placeholder: '5', type: 'number' },
     { key: 'stock', label: 'Stock', placeholder: '100', type: 'number' },
     { key: 'category', label: 'Category', placeholder: 'Dairy', type: 'text' },
+    { key: 'image', label: 'Image URL', placeholder: 'https://...', type: 'text' },
+    { key: 'gst', label: 'GST (%)', placeholder: '5', type: 'number' },
   ]
 
   return (
@@ -238,6 +244,7 @@ function ProductsTab() {
     (p) =>
       p.name.toLowerCase().includes(search.toLowerCase()) ||
       p.barcode.includes(search) ||
+      p.brand?.toLowerCase().includes(search.toLowerCase()) ||
       p.category.toLowerCase().includes(search.toLowerCase())
   )
 
@@ -292,7 +299,7 @@ function ProductsTab() {
           <table className="w-full">
             <thead className="border-b border-white/10">
               <tr>
-                {['Barcode', 'Name', 'Price', 'GST', 'Stock', 'Category', 'Actions'].map((h) => (
+                {['Barcode', 'Product', 'Price', 'GST', 'Stock', 'Category', 'Actions'].map((h) => (
                   <th key={h} className="table-header text-left">{h}</th>
                 ))}
               </tr>
@@ -301,7 +308,22 @@ function ProductsTab() {
               {filtered.map((p) => (
                 <tr key={p.id} className="border-b border-white/5 hover:bg-white/5 transition-colors">
                   <td className="table-cell font-mono text-xs text-surface-400">{p.barcode}</td>
-                  <td className="table-cell font-medium text-white">{p.name}</td>
+                  <td className="table-cell">
+                    <div className="flex items-center gap-2">
+                      {p.image && (
+                        <img 
+                          src={p.image} 
+                          alt="" 
+                          className="w-8 h-8 rounded bg-surface-800 object-cover"
+                          onError={(e) => (e.currentTarget.style.display = 'none')}
+                        />
+                      )}
+                      <div>
+                        <p className="font-medium text-white">{p.name}</p>
+                        {p.brand && <p className="text-[10px] text-primary-400 uppercase tracking-tight">{p.brand}</p>}
+                      </div>
+                    </div>
+                  </td>
                   <td className="table-cell text-emerald-400">₹{Number(p.price).toFixed(2)}</td>
                   <td className="table-cell text-surface-300">{p.gst}%</td>
                   <td className="table-cell">
