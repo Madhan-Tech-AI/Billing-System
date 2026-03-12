@@ -17,7 +17,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   const barcode = String(req.query.barcode ?? '').trim()
   if (!barcode || !/^[0-9]{7,14}$/.test(barcode)) {
-    return res.status(400).json({ error: 'Missing or invalid barcode parameter' })
+    return res.status(400).json({ error: 'Missing or invalid barcode parameter', received: barcode })
   }
 
   console.info(`[api/barcode] Processing lookup for: ${barcode}`)
@@ -203,7 +203,20 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
 
     if (!finalInfo || !finalInfo.name) {
-      return res.status(404).json({ error: 'Product not discovered' })
+      const missingKeys = []
+      if (!process.env.VITE_BARCODE_LOOKUP_API_KEY) missingKeys.push('BARCODE_LOOKUP_API_KEY')
+      if (!process.env.SERPAPI_API_KEY) missingKeys.push('SERPAPI_API_KEY')
+      if (!process.env.GEMINI_API_KEY) missingKeys.push('GEMINI_API_KEY')
+
+      console.warn(`[api/barcode] Product not discovered for barcode ${barcode}. Missing keys: ${missingKeys.join(', ')}`)
+      return res.status(404).json({ 
+        error: 'Product not discovered', 
+        barcode,
+        _diagnostics: {
+          missingKeys,
+          apisAttempted: ['barcodelookup', 'upcitemdb', 'openfoodfacts', 'serpapi', 'gemini']
+        }
+      })
     }
 
     // STEP 7: Insert the new product into Supabase products table

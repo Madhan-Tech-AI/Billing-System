@@ -13,7 +13,8 @@ async function lookupViaVercelApi(barcode: string): Promise<Product | null> {
 
     if (res.status === 404) return null
     if (!res.ok) {
-      console.warn(`[productLookup] API error ${res.status}`)
+      const errorData = await res.json().catch(() => ({}))
+      console.warn(`[productLookup] API error ${res.status}`, errorData)
       return null
     }
 
